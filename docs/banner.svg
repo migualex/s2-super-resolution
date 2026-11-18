@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 200" width="640" height="200" font-family="Segoe UI,Helvetica,Arial,sans-serif">
-<rect width="640" height="200" rx="16" fill="#0f172a"/>
+<style>.t{fill:#0f172a}.s{fill:#64748b}.a{stroke:#334155}@media (prefers-color-scheme: dark){.t{fill:#f8fafc}.s{fill:#94a3b8}.a{stroke:#e2e8f0}}</style>
 <rect x="30.0" y="30.0" width="17.5" height="17.5" fill="#1d5c2a"/>
 <rect x="30.0" y="47.5" width="17.5" height="17.5" fill="#1d5c2a"/>
 <rect x="30.0" y="65.0" width="17.5" height="17.5" fill="#d48ab0"/>
@@ -64,8 +64,8 @@
 <rect x="152.5" y="117.5" width="17.5" height="17.5" fill="#24703a"/>
 <rect x="152.5" y="135.0" width="17.5" height="17.5" fill="#24703a"/>
 <rect x="152.5" y="152.5" width="17.5" height="17.5" fill="#24703a"/>
-<text x="100" y="190" fill="#94a3b8" font-size="12" text-anchor="middle">10 m</text>
-<path d="M188 100 h34 m-10 -9 l10 9 l-10 9" stroke="#e2e8f0" stroke-width="3" fill="none" stroke-linecap="round"/>
+<text x="100" y="190" class="s" font-size="12" text-anchor="middle">10 m</text>
+<path d="M188 100 h34 m-10 -9 l10 9 l-10 9" class="a" stroke-width="3" fill="none" stroke-linecap="round"/>
 <rect x="240.0" y="30.0" width="4.375" height="4.375" fill="#1d5c2a"/>
 <rect x="240.0" y="34.375" width="4.375" height="4.375" fill="#1d5c2a"/>
 <rect x="240.0" y="38.75" width="4.375" height="4.375" fill="#1d5c2a"/>
@@ -1090,9 +1090,9 @@
 <rect x="375.625" y="156.875" width="4.375" height="4.375" fill="#24703a"/>
 <rect x="375.625" y="161.25" width="4.375" height="4.375" fill="#24703a"/>
 <rect x="375.625" y="165.625" width="4.375" height="4.375" fill="#24703a"/>
-<text x="310" y="190" fill="#94a3b8" font-size="12" text-anchor="middle">2.5 m</text>
-<text x="410" y="88" fill="#f8fafc" font-size="26" font-weight="700">Sentinel-2</text>
-<text x="410" y="118" fill="#f8fafc" font-size="22" font-weight="600">Super-Resolution</text>
-<text x="410" y="146" fill="#e0a3c2" font-size="14">PRODES composition</text>
-<text x="410" y="166" fill="#94a3b8" font-size="12">R=B11 · G=B08 · B=B04</text>
+<text x="310" y="190" class="s" font-size="12" text-anchor="middle">2.5 m</text>
+<text x="410" y="88" class="t" font-size="26" font-weight="700">Sentinel-2</text>
+<text x="410" y="118" class="t" font-size="22" font-weight="600">Super-Resolution</text>
+<text x="410" y="146" fill="#c2578f" font-size="14">PRODES composition</text>
+<text x="410" y="166" class="s" font-size="12">R=B11 · G=B08 · B=B04</text>
 </svg>
