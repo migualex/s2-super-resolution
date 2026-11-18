@@ -1,0 +1,23 @@
+# Python >= 3.10. Install PyTorch first, matching your CUDA version: https://pytorch.org/get-started/locally/
+# torch
+
+# Core (mode "fast")
+numpy
+scipy
+scikit-image
+rasterio
+affine
+requests
+tqdm
+ipywidgets
+matplotlib
+omegaconf
+einops
+huggingface_hub
+importlib-metadata
+pytorch-lightning
+opensr-model
+
+# Modes "combined" and "separate" (SEN2SR; the full model also needs mamba_ssm with CUDA 12)
+# mlstac
+# sen2sr
