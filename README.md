@@ -1,4 +1,8 @@
-# s2-super-resolution
+# Sentinel-2 Super-Resolution for PRODES Composition
+
+<p align="center">
+  <img src="docs/banner.svg" width="640" alt="Sentinel-2 Super-Resolution: 10 m → 2.5 m, PRODES composition" />
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/License-GPLv3-blue" alt="GPLv3" />
@@ -7,6 +11,14 @@
 </p>
 
 Super-resolução de imagens Sentinel-2 de 10 m para 2,5 m com os modelos **LDSR-S2** e **SEN2SR**, aplicada aos mosaicos de 16 dias do **Brazil Data Cube** (`S2-16D-2`). O resultado é a composição **PRODES** (R = B11, G = B08, B = B04) em 2,5 m.
+
+<!-- Exemplo: salve a figura de tools/preview_prodes.py como docs/example.png e descomente.
+## Exemplo
+
+<p align="center">
+  <img src="docs/example.png" width="90%" alt="Original 10 m × super-resolução 2,5 m (composição PRODES)" />
+</p>
+-->
 
 ## Instalação
 
