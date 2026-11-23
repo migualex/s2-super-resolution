@@ -1,20 +1,13 @@
 # =====================================================================
 # LDSR-S2 super-resolution of Sentinel-2 imagery (BDC S2-16D-2 mosaic)
-# 10 m -> 2.5 m, with the PRODES composite R=B11 G=B08 B=B04
-#
-# Two ways to run it:
-#   * notebook / VS Code interactive: edit BLOCK 1 and run the cells in order;
-#   * command line: python s2_super_resolution.py --tile 034026 --date 2026-07-12 --source bdc16d --prodes-composite
-#     (command-line arguments replace BLOCK 1; see parse_args() or --help)
-# Previews and comparisons: tools/preview_prodes.py and tools/compare_modes.py
 # =====================================================================
 
 # %% BLOCK 1 — PARAMETERS
-TILE = "034026"
+TILE = "012014"
 DATE = "2026-07-12"
 
-# Working directory for downloaded cubes, models and results (relative to the current directory; ignored by git)
-ROOT    = "work"
+# Working directory for downloaded cubes, models and results (relative to the notebook location)
+ROOT    = "rascunho/biomasbr-amazonia/super_resolution"
 OUT_DIR = ROOT + "/cube_resolution"            # per-run logs are written to OUT_DIR/logs
 
 # Input source:
@@ -34,7 +27,7 @@ ROI_LON     = None                             # e.g. -62.2159
 ROI_SIZE_KM = 10
 
 # Inference
-STEPS       = 50                               # DDIM steps (100 = reference, 50 ≈ 2x faster)
+STEPS       = 25                               # DDIM steps. 25 = same quality as 50 (difference = seed noise), 1.6x faster; 15 degrades
 UNCERTAINTY = 0                                # 0 = off; N > 3 adds an uncertainty map (N times slower)
 PRECISION   = "auto"                           # "auto" | "fp32" | "bf16"
 BATCH_SIZE  = 0                                # 0 = auto
@@ -42,16 +35,19 @@ OVERLAP     = 16                               # window overlap, 10 m pixels
 
 # Super-resolution mode (all modes write the PRODES composite R=B11 G=B08 B=B04 at 2.5 m):
 #   "fast"      LDSR-S2 on B04,B03,B02,B08; B11 sharpened with the LDSR-S2 output   (~1 s/window)
-#   "combined"  OpenSR LDSRS2-SEN2SR, 10 bands, B11 from SEN2SR                    (~55 s/window)
+#   "combined"  OpenSR LDSRS2-SEN2SR, 10 bands, B11 from SEN2SR                    (~3 s/window, MIG 2g.24gb)
 #   "separate"  LDSR-S2 plus SEN2SR (SEN2SR_DIR) for B11
+# B04/B08 (G and B of the PRODES composite) come from the same LDSR-S2 diffusion in "fast" and "combined",
+# so the two modes differ only in B11. B11 is a 20 m band: its 2.5 m detail is always borrowed from B04/B03/B02/B08.
 MODE         = "fast"
 COMBINED_DIR = ROOT + "/model/LDSRS2-SEN2SR"   # downloaded on first use (~1.5 GB)
 WITH_B11     = True                            # "separate" only
 SEN2SR_DIR   = ROOT + "/model/SEN2SR_main"     # "separate" only; Mamba-free alternative: ROOT + "/model/SEN2SRLite"
 
-# Gaussian sigma (10 m pixels) applied to the 20 m bands before super-resolution.
-# BDC resamples them to 10 m by nearest neighbour; 0 keeps the original values (file name gets "_raw").
-DEBLOCK_20M = 1.0
+# Optional Gaussian sigma (10 m pixels) applied to the 20 m bands before super-resolution (file name gets "_db<sigma>").
+# Keep 0 for BDC S2-16D-2: its 20 m bands are already interpolated to 10 m (no 2x2 blocks), so any blur removes real
+# detail (sigma 1 removes ~70 % of the contrast at the 20 m scale). Use > 0 only for inputs with 2x2 blocks.
+DEBLOCK_20M = 0.0
 
 # Load torch from the conda environment (CUDA 12, required by mamba_ssm). Restart the kernel after changing.
 USE_ENV_TORCH = True
@@ -67,11 +63,6 @@ PROBE_ONLY = False                             # hardware and batch-size check o
 import os, sys, site, importlib, importlib.util, importlib.machinery, subprocess, time, warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="timm")
 _T_CELL0 = time.perf_counter()
-
-# Command-line use replaces BLOCK 1 (inside Jupyter, sys.argv holds the kernel's own arguments)
-_CLI = __name__ == "__main__" and len(sys.argv) > 1 and "ipykernel" not in sys.modules
-if _CLI and "--mode" in sys.argv[:-1]:
-    MODE = sys.argv[sys.argv.index("--mode") + 1]     # decides which optional dependencies to install
 
 if globals().get("USE_ENV_TORCH", True):
     _user_sp = site.getusersitepackages()
@@ -364,16 +355,16 @@ def area_label(args):
 
 def run_stem(args, src_kind, combined, fast, uses_b20):
     """Short file name (no extension): {tile}_{date}_{mode}_{area}, plus a marker only when a setting differs from
-    the usual one: _raw (20 m bands not de-blocked), _s<N> (DDIM steps other than 50), _<source> (not bdc16d).
+    the usual one: _db<sigma> (20 m bands blurred), _s<N> (DDIM steps other than 25), _<source> (not bdc16d).
     Everything else is stored in the GeoTIFF tags, the .log and the .report.json with the same name."""
     mode = "combined" if combined else "bicubic" if args.engine == "bicubic" else "fast" if fast else "separate"
     area = ("tile" if not args.center else
             f"{args.box_km:g}km_{abs(args.center[0]):.4f}{'N' if args.center[0] >= 0 else 'S'}"
             f"_{abs(args.center[1]):.4f}{'E' if args.center[1] >= 0 else 'W'}")
     parts = [args.tile, args.date.replace("-", ""), mode, area]
-    if uses_b20 and args.deblock_20m <= 0:
-        parts.append("raw")
-    if args.engine == "ldsr" and args.steps != 50:
+    if uses_b20 and args.deblock_20m > 0:
+        parts.append(f"db{args.deblock_20m:g}")
+    if args.engine == "ldsr" and args.steps != 25:
         parts.append(f"s{args.steps}")
     if src_kind != "bdc16d":
         parts.append(src_kind.replace("_", "-"))
@@ -538,43 +529,55 @@ _GAUSS = {}
 
 
 def soften_20m(X, idx, sigma):
-    """Gaussian smoothing (sigma in 10 m px) of the channels `idx`, nodata (0) excluded by normalised convolution.
-    Turns the BDC nearest-neighbour 2x2 blocks of the 20 m bands back into a smooth 20 m-like surface."""
+    """Optional Gaussian smoothing (sigma in 10 m px) of the channels `idx`, nodata (0) excluded by normalised
+    convolution. Only useful for inputs whose 20 m bands were replicated in 2x2 blocks (nearest neighbour).
+    The BDC S2-16D-2 20 m bands are already smooth (interpolated), so this only removes real detail there."""
     if not sigma or sigma <= 0:
         return X
-    key = (round(float(sigma), 3), str(X.device))
-    if key not in _GAUSS:
-        r = max(1, int(np.ceil(3 * sigma)))
-        x = torch.arange(-r, r + 1, dtype=torch.float32, device=X.device)
-        k = torch.exp(-0.5 * (x / sigma) ** 2)
-        _GAUSS[key] = (k / k.sum(), r)
-    k, r = _GAUSS[key]
     idx = list(idx)
     sub = X[:, idx].float()
     m = (sub > 0).float()
-    c = sub.shape[1]
-
-    def blur(t):
-        t = F.pad(t, (r, r, r, r), mode="reflect")
-        t = F.conv2d(t, k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
-        return F.conv2d(t, k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
-
-    out = torch.where(m > 0, blur(sub * m) / blur(m).clamp_min(1e-6), torch.zeros_like(sub))
+    out = torch.where(m > 0, _gauss_blur(sub * m, sigma) / _gauss_blur(m, sigma).clamp_min(1e-6), torch.zeros_like(sub))
     X = X.clone()
     X[:, idx] = out.to(X.dtype)
     return X
 
 
-def guided_b11(lr4, lr11, sr4, s=4, ridge=1e-2):
-    """B11 at 2.5 m via regression-based detail injection (pansharpening):
-    1) per window, fit B11_10m ~ c0 + sum(ci * band_i_10m) for B04,B03,B02,B08 (ridge relative to the Gram diagonal,
-       because B02/B03/B04 are strongly collinear);
-    2) B11_sr = bicubic(B11) + [c0 + sum(ci*SR_i)] - bicubic[c0 + sum(ci*band_i_10m)]  (high frequencies only);
-    3) consistency correction so every 4x4 block averages back to the input 10 m B11."""
+B11_SIGMA = 1.0                        # effective resolution of the BDC B11 on the 10 m grid (Gaussian sigma, 10 m px)
+
+
+def _gauss_blur(t, sigma):
+    """Separable Gaussian blur (sigma in pixels), reflect padding; channels blurred independently."""
+    key = (round(float(sigma), 3), str(t.device))
+    if key not in _GAUSS:
+        r = max(1, int(np.ceil(3 * sigma)))
+        x = torch.arange(-r, r + 1, dtype=torch.float32, device=t.device)
+        k = torch.exp(-0.5 * (x / sigma) ** 2)
+        _GAUSS[key] = (k / k.sum(), r)
+    k, r = _GAUSS[key]
+    c = t.shape[1]
+    t = F.pad(t, (r, r, r, r), mode="reflect")
+    t = F.conv2d(t, k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
+    return F.conv2d(t, k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
+
+
+def guided_b11(lr4, lr11, sr4, s=4, ridge=1e-2, sigma=B11_SIGMA):
+    """B11 at 2.5 m via MTF-matched regression detail injection (pansharpening).
+    The BDC B11 is a 20 m band resampled to 10 m: it has no detail finer than ~20 m. So
+    1) the B04,B03,B02,B08 regressors are first low-passed to that resolution (sigma), and per window
+       B11 ~ c0 + sum(ci * LP(band_i)) is fitted (ridge relative to the Gram diagonal: B02/B03/B04 are collinear);
+    2) B11_sr = bicubic(B11) + sum(ci * (SR_i - bicubic(LP(band_i)))): everything finer than 20 m is injected,
+       including the 20 -> 10 m scale that a plain 10 m fit leaves empty;
+    3) consistency: the SR B11, degraded back to 10 m and to the B11 resolution, matches the input B11.
+    Wald-protocol test on BDC data (x4): RMSE -29 % and detail correlation 0.37 -> 0.53 against the previous
+    version with DEBLOCK_20M = 1."""
     lr4, lr11, sr4 = lr4.float(), lr11.float(), sr4.float()
     B = lr4.shape[0]
     valid = (lr4 > 0).all(1, keepdim=True) & (lr11 > 0)
-    A = torch.cat([torch.ones_like(lr11), lr4], 1)
+    vf = valid.float()
+    # normalised convolution so nodata (0) does not leak into the low-pass
+    lp4 = _gauss_blur(lr4 * vf, sigma) / _gauss_blur(vf, sigma).clamp_min(1e-6)
+    A = torch.cat([torch.ones_like(lr11), lp4], 1)
     coef = torch.zeros(B, 5, device=lr4.device)
     eye = torch.eye(5, device=lr4.device)
     for b in range(B):
@@ -585,17 +588,17 @@ def guided_b11(lr4, lr11, sr4, s=4, ridge=1e-2):
         yb = lr11[b].reshape(-1)[m]
         G = Ab.T @ Ab
         coef[b] = torch.linalg.solve(G + eye * (ridge * G.diagonal().mean()), Ab.T @ yb)
-    c0, ci = coef[:, :1, None, None], coef[:, 1:, None, None]
-    pred_hr = c0 + (ci * sr4).sum(1, keepdim=True)
-    pred_lr = c0 + (ci * lr4).sum(1, keepdim=True)
+    ci = coef[:, 1:, None, None]
 
     def up(t):
         return F.interpolate(t, scale_factor=s, mode="bicubic", align_corners=False)
 
-    out = up(lr11) + (pred_hr - up(pred_lr))
-    corr = lr11 - F.avg_pool2d(out, s)
-    out = out + F.interpolate(corr, scale_factor=s, mode="bilinear", align_corners=False)
-    return out.clamp_(min=0.0) * F.interpolate(valid.float(), scale_factor=s, mode="nearest")
+    fill = (lr11 * vf).sum((2, 3), keepdim=True) / vf.sum((2, 3), keepdim=True).clamp_min(1)
+    lr11f = torch.where(valid, lr11, fill.expand_as(lr11))     # nodata -> window mean (masked out at the end)
+    out = up(lr11f) + (ci * (sr4 - up(lp4))).sum(1, keepdim=True)
+    corr = lr11f - _gauss_blur(F.avg_pool2d(out, s), sigma)
+    out = out + up(corr)
+    return out.clamp_(min=0.0) * F.interpolate(vf, scale_factor=s, mode="nearest")
 
 
 class LDSRGuidedB11Engine:
@@ -758,6 +761,35 @@ def patch_ldsr_classes(model, state):
     return n
 
 
+def patch_swin_masks(model):
+    """Swin2SR (sen2sr) rebuilds the shifted-window attention mask ON THE CPU in every block of every forward
+    whenever the input size differs from the training img_size (always the case here: 128 px into the 64 px f2
+    model, 512 px into the 128 px f4 model). Caching the mask on the GPU gives identical output and was measured
+    at 25 s -> 0.16 s (f2) and 45 s -> 2.1 s (f4) per window on an H100 MIG 2g.24gb slice."""
+    n = 0
+    for m in _all_modules(model):
+        cls = type(m)
+        if not hasattr(cls, "calculate_mask") or getattr(cls, "_mask_cached", False):
+            continue
+        orig = cls.calculate_mask
+
+        def calculate_mask(self, x_size, _orig=orig):
+            dev = next(self.parameters()).device
+            cache = _SWIN_MASKS.setdefault(id(type(self)), {})
+            k = (tuple(int(v) for v in x_size), self.window_size, self.shift_size, str(dev))
+            if k not in cache:
+                cache[k] = _orig(self, x_size).to(dev)
+            return cache[k]
+
+        cls.calculate_mask = calculate_mask
+        cls._mask_cached = True
+        n += 1
+    return n
+
+
+_SWIN_MASKS = {}
+
+
 def _lightning_stub_if_broken():
     try:
         import pytorch_lightning  # noqa: F401
@@ -810,6 +842,8 @@ class Sen2SREngine:
             log.info("Model parameters: %.1f M on GPU | %.1f M on CPU", n_gpu / 1e6, n_cpu / 1e6)
             if n_cpu:
                 log.warning("Some parameters are still on the CPU: that part of the model will be slow.")
+        if patch_swin_masks(self.model):
+            log.info("Swin2SR attention masks cached on %s (avoids rebuilding them on the CPU every forward).", device)
         self.ldsr_state, self.n_ldsr, self._calls = ldsr_state, 0, 0
         if ldsr_state is not None:
             self.n_ldsr = patch_ldsr_classes(self.model, ldsr_state)
@@ -1480,7 +1514,7 @@ def run_pipeline(stack: BandStack, runner: BatchRunner, args, out_paths: dict, b
 
     key = json.dumps(dict(tag=tag, hrefs=stack.hrefs, roi=[stack.x0, stack.y0, stack.W, stack.H], ov=args.overlap,
                           trim=args.trim, steps=args.steps, nvar=args.uncertainty, S=S, hist=args.hist_match,
-                          db=args.deblock_20m, scale=stack.scales, offset=stack.offsets), sort_keys=True)
+                          db=args.deblock_20m, scale=stack.scales, offset=stack.offsets, b11="mtf-v2"), sort_keys=True)
     phash = hashlib.sha1(key.encode()).hexdigest()[:16]
 
     prog_path = out_paths["sr"].with_suffix(".progress.json")
@@ -1632,9 +1666,9 @@ def parse_args(argv):
     g.add_argument("--date", required=True)
     g.add_argument("--source", choices=["auto", "local", "16d", "l2a", "bdc16d"], default="auto")
     g.add_argument("--local-pattern",
-                   default="work/cube/SENTINEL-2_MSI_{tile}_{band}_{date}.tif")
+                   default="rascunho/biomasbr-amazonia/super_resolution/cube/SENTINEL-2_MSI_{tile}_{band}_{date}.tif")
     g.add_argument("--local-kind", choices=["16d", "l2a"], default="16d")
-    g.add_argument("--download-dir", default="work/cube_bdc_16d")
+    g.add_argument("--download-dir", default="rascunho/biomasbr-amazonia/super_resolution/cube_bdc_16d")
     g.add_argument("--stac-url", default="https://data.inpe.br/bdc/stac/v1")
     g.add_argument("--collection-16d", default="S2-16D-2")
     g.add_argument("--collection-l2a", default="S2_L2A-1")
@@ -1649,14 +1683,14 @@ def parse_args(argv):
     g.add_argument("--box-km", type=float, default=10.0)
     g = p.add_argument_group("model")
     g.add_argument("--mode", choices=["fast", "combined", "separate"], default="fast")
-    g.add_argument("--combined-dir", default="work/model/LDSRS2-SEN2SR")
+    g.add_argument("--combined-dir", default="rascunho/biomasbr-amazonia/super_resolution/model/LDSRS2-SEN2SR")
     g.add_argument("--engine", choices=["ldsr", "bicubic"], default="ldsr")
-    g.add_argument("--model-dir", default="work/model/LDSR_S2")
+    g.add_argument("--model-dir", default="rascunho/biomasbr-amazonia/super_resolution/model/LDSR_S2")
     g.add_argument("--config", default=None)
     g.add_argument("--steps", type=int, default=100)
     g.add_argument("--hist-match", choices=["gpu", "cpu", "off"], default="gpu")
     g.add_argument("--uncertainty", type=int, default=0)
-    g.add_argument("--deblock-20m", type=float, default=1.0)
+    g.add_argument("--deblock-20m", type=float, default=0.0)
     g.add_argument("--seed", type=int, default=42)
     g = p.add_argument_group("performance")
     g.add_argument("--precision", choices=["auto", "fp32", "bf16", "fp16"], default="auto")
@@ -1667,12 +1701,12 @@ def parse_args(argv):
     g.add_argument("--trim", type=int, default=2)
     g.add_argument("--min-valid", type=float, default=0.02)
     g = p.add_argument_group("output")
-    g.add_argument("--out-dir", default="work/cube_resolution")
+    g.add_argument("--out-dir", default="rascunho/biomasbr-amazonia/super_resolution/cube_resolution")
     g.add_argument("--compress", choices=["zstd", "deflate", "lzw", "none"], default="zstd")
     g.add_argument("--zstd-level", type=int, default=9)
     g.add_argument("--overwrite", action="store_true")
     g.add_argument("--with-b11", action="store_true")
-    g.add_argument("--sen2sr-dir", default="work/model/SEN2SR_main")
+    g.add_argument("--sen2sr-dir", default="rascunho/biomasbr-amazonia/super_resolution/model/SEN2SR_main")
     g.add_argument("--prodes-composite", action="store_true")
     g.add_argument("--probe-only", action="store_true")
     return p.parse_args(argv)
@@ -1952,7 +1986,7 @@ def main(argv=None, t_start=None):
 def _argv_from_params():
     g = globals().get
     mode = g("MODE", "fast")
-    R = g("ROOT", "work")
+    R = g("ROOT", "rascunho/biomasbr-amazonia/super_resolution")
     a = ["--tile", g("TILE"), "--date", g("DATE"), "--out-dir", g("OUT_DIR", R + "/cube_resolution"),
          "--source", g("SOURCE", "auto"), "--local-pattern", g("LOCAL_PATTERN", R + "/cube/SENTINEL-2_MSI_{tile}_{band}_{date}.tif"),
          "--local-kind", g("LOCAL_KIND", "16d"), "--download-dir", g("DOWNLOAD_DIR", R + "/cube_bdc_16d"),
@@ -1965,7 +1999,7 @@ def _argv_from_params():
         raise SystemExit("Set both ROI_LAT and ROI_LON, or leave both as None for the whole tile.")
     if lat is not None:
         a += ["--center", str(lat), str(lon), "--box-km", str(g("ROI_SIZE_KM", 10))]
-    a += ["--deblock-20m", str(g("DEBLOCK_20M", 1.0))]
+    a += ["--deblock-20m", str(g("DEBLOCK_20M", 0.0))]
     if g("UNCERTAINTY"):
         a += ["--uncertainty", str(g("UNCERTAINTY"))]
     if g("CONFIG"):
@@ -1982,9 +2016,299 @@ def _argv_from_params():
 
 
 try:
-    main(sys.argv[1:] if _CLI else _argv_from_params(), t_start=_T_CELL0)
+    main(_argv_from_params(), t_start=_T_CELL0)
 except SystemExit as _e:
     if _e.code not in (0, None):
         print("ERROR:", _e.code)
 except KeyboardInterrupt:
     print("Interrupted. Run block 2 again to resume where it stopped.")
+
+
+# %% BLOCK 3 (optional) — PRODES PREVIEW (R=B11, G=B08, B=B04)
+import glob, os, json, numpy as np, rasterio, matplotlib.pyplot as plt
+from rasterio.enums import Resampling
+from rasterio.windows import Window, from_bounds
+from tqdm.auto import tqdm
+
+ZOOM_LR_PX = 256                 # detail crop size, in 10 m pixels
+ZOOM_CENTER = None               # (x, y) in 10 m pixels inside the processed area; None = center
+
+_bar = tqdm(total=4, desc="Preview: reading report", unit="step")
+_reps = sorted(glob.glob(os.path.join(OUT_DIR, "logs", "*.report.json")), key=os.path.getmtime)
+if not _reps:
+    _bar.close()
+    raise SystemExit(f"No report in {OUT_DIR}/logs: run block 2 first.")
+rep = json.load(open(_reps[-1], encoding="utf-8"))
+outs, inp = rep.get("outputs", {}), rep.get("input_files", {})
+_bar.update(1)
+
+
+def _stretch(x, lo, hi):
+    return np.clip((x.astype("float32") - lo) / max(hi - lo, 1e-6), 0, 1)
+
+
+if "prodes" in outs and os.path.exists(outs["prodes"]):
+    _bar.set_description("Preview: PRODES overview")
+    with rasterio.open(outs["prodes"]) as d:
+        k = max(1, max(d.height, d.width) // 1500)
+        over = d.read([1, 2, 3], out_shape=(3, d.height // k, d.width // k), resampling=Resampling.average)
+        t = d.tags()
+        lo = [float(v) for v in t.get("STRETCH_LO", "0,0,0").split(",")]
+        hi = [float(v) for v in t.get("STRETCH_HI", "10000,10000,10000").split(",")]
+        S = 4
+        Wlr, Hlr = d.width // S, d.height // S
+        ZOOM_LR_PX = int(min(ZOOM_LR_PX, Wlr, Hlr))
+        half = ZOOM_LR_PX // 2
+        cx, cy = ZOOM_CENTER if ZOOM_CENTER else (Wlr // 2, Hlr // 2)
+        cx, cy = min(max(cx, half), Wlr - half), min(max(cy, half), Hlr - half)
+        win_sr = Window((cx - half) * S, (cy - half) * S, ZOOM_LR_PX * S, ZOOM_LR_PX * S)
+        sr_zoom = d.read([1, 2, 3], window=win_sr)
+        bounds = rasterio.windows.bounds(win_sr, d.transform)
+    _bar.update(1)
+    _bar.set_description("Preview: original 10 m crop")
+    orig = []
+    for b in ("B11", "B08", "B04"):
+        with rasterio.open(inp[b]) as d:
+            orig.append(d.read(1, window=from_bounds(*bounds, transform=d.transform),
+                               out_shape=(ZOOM_LR_PX, ZOOM_LR_PX), resampling=Resampling.nearest))
+    orig = np.stack([_stretch(o, lo[i], hi[i]) for i, o in enumerate(orig)], -1)
+    _bar.update(1)
+    _bar.set_description("Preview: drawing")
+    fig, ax = plt.subplots(1, 3, figsize=(20, 7))
+    ax[0].imshow(np.stack([_stretch(over[i], lo[i], hi[i]) for i in range(3)], -1))
+    ax[0].set_title("SR 2.5 m — overview (R=B11 G=B08 B=B04)")
+    r = Window(win_sr.col_off / k, win_sr.row_off / k, win_sr.width / k, win_sr.height / k)
+    ax[0].add_patch(plt.Rectangle((r.col_off, r.row_off), r.width, r.height, fill=False, ec="yellow", lw=1.5))
+    ax[1].imshow(orig)
+    ax[1].set_title(f"Original 10 m — {ZOOM_LR_PX} px crop")
+    ax[2].imshow(np.stack([_stretch(sr_zoom[i], lo[i], hi[i]) for i in range(3)], -1))
+    ax[2].set_title("Super-resolution 2.5 m — same crop")
+    for a_ in ax:
+        a_.axis("off")
+    plt.tight_layout()
+else:
+    _bar.update(2)
+    _bar.set_description("Preview: no B11 -> showing B08/B04/B03")
+    with rasterio.open(outs["sr"]) as d:
+        k = max(1, max(d.height, d.width) // 1500)
+        desc = list(d.descriptions)
+        idx = [desc.index(b) + 1 if b in desc else j for b, j in (("B08", 4), ("B04", 1), ("B03", 2))]
+        a = d.read(idx, out_shape=(3, d.height // k, d.width // k), resampling=Resampling.average).astype("float32")
+    v = a[:, a[0] > 0]
+    lo_, hi_ = np.percentile(v, 2, axis=1), np.percentile(v, 98, axis=1)
+    plt.figure(figsize=(10, 10))
+    plt.imshow(np.clip((a.transpose(1, 2, 0) - lo_) / (hi_ - lo_ + 1e-6), 0, 1))
+    plt.title("SR 2.5 m (B08/B04/B03)")
+    plt.axis("off")
+_bar.update(1)
+_bar.set_description("Preview ready")
+_bar.close()
+plt.show()
+
+# %% BLOCK 4 (optional) — COMPARISON: original 10 m vs LDSR-S2 (fast) vs combined — visible, PRODES and B11 diagnostics
+# Requires block 2 runs with the same TILE, DATE and ROI (e.g. "fast" and "combined").
+# All products found in OUT_DIR are displayed with the stretch of the original 10 m image.
+import glob, os, re, json, numpy as np, rasterio, matplotlib.pyplot as plt
+from rasterio.enums import Resampling
+from rasterio.windows import from_bounds
+from tqdm.auto import tqdm
+
+CMP_ZOOM_PX = 160                # displayed crop, in 10 m pixels
+CMP_METRIC_PX = 512              # area used for the numbers, in 10 m pixels
+CMP_CENTER = None                # (x, y) in 10 m pixels inside the processed area; None = center
+CMP_KEEP = None                  # None = all products found | list of name fragments, e.g. ["combined", "_db1"]
+
+_bar = tqdm(total=5, desc="Comparison: locating products", unit="step")
+_cand, TAGS = [], {}
+_D8 = DATE.replace("-", "")
+for _f in glob.glob(os.path.join(OUT_DIR, f"{TILE}_{_D8}_*.tif")):
+    if "partial" in _f:
+        continue
+    with rasterio.open(_f) as _d:
+        _t = _d.tags()
+    if (_t.get("MODE") in ("fast", "combined") and _t.get("PRODUCT", "").startswith("SR")
+            and (CMP_KEEP is None or any(k in os.path.basename(_f) for k in CMP_KEEP))):
+        _cand.append(_f)
+        TAGS[_f] = _t
+if not _cand:
+    _bar.close()
+    raise SystemExit(f"No fast/combined product for {TILE} {DATE} in {OUT_DIR}: run block 2 first.")
+_grp = TAGS[max(_cand, key=os.path.getmtime)].get("AREA", "")
+prods = sorted([f for f in _cand if TAGS[f].get("AREA", "") == _grp],
+               key=lambda f: (0 if TAGS[f]["MODE"] == "fast" else 1, os.path.basename(f)))
+
+
+def _label(f):
+    t = TAGS[f]
+    sig = float(t.get("DEBLOCK_20M", 0) or 0)
+    kind = "LDSR-S2 + guided B11 (fast)" if t["MODE"] == "fast" else "LDSRS2-SEN2SR (combined)"
+    return (kind + f", {t.get('DDIM_STEPS', '?')} steps" +
+            (f"\n20 m de-blocked, sigma={sig:g}" if sig > 0 else "\n20 m raw BDC")), sig
+
+
+_inp = {}
+for _r in glob.glob(os.path.join(OUT_DIR, "logs", f"{TILE}_{_D8}_*.report.json")):
+    _inp.update(json.load(open(_r, encoding="utf-8")).get("input_files", {}))
+_need = ("B02", "B03", "B04", "B08", "B11")
+_miss = [b for b in _need if b not in _inp or not os.path.exists(_inp[b])]
+if _miss:
+    _bar.close()
+    raise SystemExit(f"Original 10 m bands not found for {_miss}: the reports in {OUT_DIR}/logs do not list them.")
+_bar.update(1)
+_bar.set_description("Comparison: reading crops")
+
+with rasterio.open(prods[0]) as d:
+    _Wlr, _Hlr = d.width // 4, d.height // 4
+    M = int(min(CMP_METRIC_PX, _Wlr, _Hlr))
+    Z = int(min(CMP_ZOOM_PX, M))
+    cx, cy = CMP_CENTER if CMP_CENTER else (_Wlr // 2, _Hlr // 2)
+    cx, cy = min(max(cx, M // 2), _Wlr - M // 2), min(max(cy, M // 2), _Hlr - M // 2)
+    _win = rasterio.windows.Window((cx - M // 2) * 4, (cy - M // 2) * 4, M * 4, M * 4)
+    BOUNDS = rasterio.windows.bounds(_win, d.transform)
+
+
+def _read_orig(b):
+    with rasterio.open(_inp[b]) as d:
+        s = d.scales[0] if d.scales and d.scales[0] not in (None, 1.0) else 1e-4
+        a = d.read(1, window=from_bounds(*BOUNDS, transform=d.transform), out_shape=(M, M),
+                   resampling=Resampling.nearest).astype("float32")
+        return np.where(a > 0, a * s, 0.0).astype("float32")
+
+
+def _read_sr(f, bands):
+    with rasterio.open(f) as d:
+        desc = list(d.descriptions)
+        idx = [desc.index(b) + 1 for b in bands]
+        a = d.read(idx, window=from_bounds(*BOUNDS, transform=d.transform), out_shape=(len(idx), M * 4, M * 4),
+                   resampling=Resampling.nearest).astype("float32")
+        return a * 1e-4
+
+
+ORIG = {b: _read_orig(b) for b in _need}
+SR = {}
+for f in prods:
+    SR[f] = dict(zip(_need, _read_sr(f, list(_need))))
+_bar.update(1)
+_bar.set_description("Comparison: computing numbers")
+
+
+def _blk(a, k=4):
+    return a.reshape(a.shape[0] // k, k, a.shape[1] // k, k).mean((1, 3))
+
+
+def _gauss(a, s):
+    if s <= 0:
+        return a
+    r = int(np.ceil(3 * s))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / s) ** 2)
+    k /= k.sum()
+    for ax in (0, 1):
+        ap = np.pad(a, [(r, r) if i == ax else (0, 0) for i in range(2)], mode="reflect")
+        n = a.shape[ax]
+        a = sum(k[i] * np.take(ap, np.arange(i, i + n), axis=ax) for i in range(2 * r + 1))
+    return a
+
+
+def _lap_std(a, m):
+    c = a[1:-1, 1:-1]
+    lap = 4 * c - a[:-2, 1:-1] - a[2:, 1:-1] - a[1:-1, :-2] - a[1:-1, 2:]
+    mm = m[1:-1, 1:-1] & m[:-2, 1:-1] & m[2:, 1:-1] & m[1:-1, :-2] & m[1:-1, 2:]
+    return float(lap[mm].std())
+
+
+def _stair(a, m, period):
+    """max/min of the mean |gradient| over the `period` phases: ~1 = no periodic grid, >>1 = blocky 20 m pattern"""
+    out = []
+    for A, Mk in ((a, m), (a.T, m.T)):
+        g = np.abs(np.diff(A, axis=1))
+        mg = Mk[:, 1:] & Mk[:, :-1]
+        per = [g[:, i::period][mg[:, i::period]].mean() for i in range(period)]
+        out.append(max(per) / max(min(per), 1e-9))
+    return min(max(out), 99.0)
+
+
+_mo = np.all([ORIG[b] > 0 for b in _need], axis=0)
+_ref_det = _lap_std(ORIG["B11"], _mo) / _lap_std(ORIG["B08"], _mo)
+rows_ = [dict(name="Original 10 m", dev="-", b11_bias="-", b11_mae="-", det=f"{_ref_det:.2f}",
+              st11=f"{_stair(ORIG['B11'], _mo, 2):.2f}", st08=f"{_stair(ORIG['B08'], _mo, 2):.2f}")]
+for f in prods:
+    lab, sig = _label(f)
+    s = SR[f]
+    ms = np.all([s[b] > 0 for b in _need], axis=0)
+    ml = _blk(ms.astype("float32")) > 0.99
+    dev = np.mean([np.abs(_blk(s[b]) - ORIG[b])[ml & _mo].mean() for b in ("B04", "B03", "B02", "B08")]) * 1e4
+    ref11 = _gauss(ORIG["B11"], sig)
+    dd = (_blk(s["B11"]) - ref11)[ml & _mo]
+    rows_.append(dict(name=lab.replace("\n", " | "), dev=f"{dev:.0f}", b11_bias=f"{dd.mean() * 1e4:+.0f}",
+                      b11_mae=f"{np.abs(dd).mean() * 1e4:.0f}",
+                      det=f"{_lap_std(s['B11'], ms) / _lap_std(s['B08'], ms):.2f}",
+                      st11=f"{_stair(s['B11'], ms, 8):.2f}", st08=f"{_stair(s['B08'], ms, 8):.2f}"))
+_bar.update(1)
+
+print(f"\nArea compared: {M} x {M} px at 10 m ({M / 100:.1f} x {M / 100:.1f} km) | all values in reflectance x 10,000")
+print(f"{'product':72s} {'vis/NIR MAE':>11s} {'B11 bias':>9s} {'B11 MAE':>8s} {'B11/B08 detail':>15s} {'grid B11':>9s} {'grid B08':>9s}")
+for r in rows_:
+    print(f"{r['name']:72s} {r['dev']:>11s} {r['b11_bias']:>9s} {r['b11_mae']:>8s} {r['det']:>15s} {r['st11']:>9s} {r['st08']:>9s}")
+print("vis/NIR MAE : mean |4x4 block mean of the SR band - original band|  (radiometric fidelity, B04 B03 B02 B08)")
+print("B11 bias/MAE: same test for B11 against the original B11 (smoothed with the same sigma when de-blocked)")
+print("B11/B08 detail: fine-detail energy of B11 relative to B08 (Laplacian std). Real SWIR is smoother than NIR:")
+print("                a value well above the original suggests detail injected into B11, not measured.")
+print("grid        : ~1.0 = no 20 m block pattern; clearly > 1.3 = visible 2x2 / 8x8 px staircase (capped at 99)")
+print("              the original's B11/B08 detail is inflated by the block edges themselves")
+
+if len(prods) > 1:
+    print("\nDifference between products (mean |A - B| / mean original reflectance):")
+    for f in prods[1:]:
+        vis = np.mean([np.abs(SR[prods[0]][b] - SR[f][b]).mean() / ORIG[b][_mo].mean() for b in ("B04", "B03", "B02")])
+        nir = np.abs(SR[prods[0]]["B08"] - SR[f]["B08"]).mean() / ORIG["B08"][_mo].mean()
+        b11 = np.abs(SR[prods[0]]["B11"] - SR[f]["B11"]).mean() / ORIG["B11"][_mo].mean()
+        verdict = ("B11 is what differs" if b11 > 2 * max(vis, nir) else "bands differ by similar amounts")
+        _short = lambda g: f"{TAGS[g]['MODE']} (deblock {float(TAGS[g].get('DEBLOCK_20M', 0) or 0):g})"
+        print(f"  {_short(prods[0])} vs {_short(f):24s}"
+              f" visible {100 * vis:5.1f}% | B08 {100 * nir:5.1f}% | B11 {100 * b11:5.1f}%  -> {verdict}")
+
+_bar.set_description("Comparison: drawing")
+o = (M - Z) // 2
+zl, zs = (slice(o, o + Z), slice(o, o + Z)), (slice(4 * o, 4 * (o + Z)), slice(4 * o, 4 * (o + Z)))
+
+
+def _rng(a, lo=2, hi=98):
+    v = a[a > 0]
+    return (np.percentile(v, lo), np.percentile(v, hi)) if v.size else (0.0, 1.0)
+
+
+_vlo = min(_rng(ORIG[b])[0] for b in ("B04", "B03", "B02"))
+_vhi = max(_rng(ORIG[b])[1] for b in ("B04", "B03", "B02"))
+_pr = {b: _rng(ORIG[b]) for b in ("B11", "B08", "B04")}
+
+
+def _st(a, lo, hi):
+    return np.clip((a - lo) / max(hi - lo, 1e-6), 0, 1)
+
+
+def _vis(d, sl):
+    return np.dstack([_st(d[b][sl], _vlo, _vhi) for b in ("B04", "B03", "B02")])
+
+
+def _pro(d, sl):
+    return np.dstack([_st(d[b][sl], *_pr[b]) for b in ("B11", "B08", "B04")])
+
+
+cols = [("Original 10 m\n(BDC values)", ORIG, zl)] + [(_label(f)[0], SR[f], zs) for f in prods]
+fig, ax = plt.subplots(3, len(cols), figsize=(4.4 * len(cols), 13), squeeze=False)
+for j, (title, dat, sl) in enumerate(cols):
+    ax[0, j].imshow(_vis(dat, sl), interpolation="nearest")
+    ax[1, j].imshow(_pro(dat, sl), interpolation="nearest")
+    ax[2, j].imshow(_st(dat["B11"][sl], *_pr["B11"]), cmap="gray", interpolation="nearest")
+    ax[0, j].set_title(title, fontsize=10)
+for i, t in enumerate(("Visible  R=B04 G=B03 B=B02", "PRODES  R=B11 G=B08 B=B04", "B11 alone")):
+    ax[i, 0].set_ylabel(t, fontsize=11)
+for a_ in ax.ravel():
+    a_.set_xticks([])
+    a_.set_yticks([])
+fig.suptitle(f"{TILE} {DATE} — same colour stretch in every panel (taken from the original 10 m)", fontsize=12)
+plt.tight_layout()
+_bar.update(1)
+_bar.set_description("Comparison ready")
+_bar.close()
+plt.show()
