@@ -3,32 +3,26 @@
 <p align="center">
   <img src="https://img.shields.io/badge/License-GPLv3-blue" alt="GPLv3" />
   <img src="https://img.shields.io/badge/lifecycle-experimental-orange.svg" alt="experimental" />
-  <img src="https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white" alt="Python 3.10+" />
+  <img src="https://img.shields.io/badge/CUDA-NVIDIA-76B900?logo=nvidia&logoColor=white" alt="CUDA NVIDIA" />
 </p>
 
-Super-resolução dos mosaicos Sentinel-2 de 16 dias do Brazil Data Cube (`S2-16D-2`) (FERREIRA et al., 2020), de 10 m para 2,5 m, com o modelo de difusão LDSR-S2 (DONIKE et al., 2025). O produto é um material de apoio à interpretação visual do Prodes na composição R = B11, G = B08, B = B04. Ele não substitui as imagens usadas atualmente no mapeamento. O mesmo script e os mesmos parâmetros foram usados nos tiles do Pantanal e do Lavrado, com os mosaicos de 2026-07-28 e 2025-07-28.
+Super-resolução dos mosaicos Sentinel-2 de 16 dias do Brazil Data Cube (`S2-16D-2`) (FERREIRA et al., 2020), de 10 m para 2,5 m, com o modelo de difusão LDSR-S2 (DONIKE et al., 2025a), na implementação do pacote opensr-model (DONIKE et al., 2025b). O produto é um material de apoio à interpretação visual do Prodes na composição R = B11, G = B08, B = B04.
 
 ## Exemplos
 
-Composição Prodes (R = B11, G = B08, B = B04). Em cada figura, as imagens de 10 m e de 2,5 m usam o mesmo realce (percentis de 2 a 98% da imagem de 10 m).
+Pantanal, tile 018023, mosaicos de 28/07/2025 e 28/07/2026, na composição Prodes (R = B11, G = B08, B = B04). Em cada ano, as imagens de 10 m e de 2,5 m usam o mesmo realce (percentis de 2 a 98% da imagem de 10 m). As escalas valem para as figuras em tamanho original, com cada painel de 400 pixels (10,16 cm).
 
 <p align="center">
-  <img src="docs/exemplo_prodes_2025_2026.png" width="100%" alt="Fragmento florestal desmatado entre julho de 2025 e julho de 2026, a 10 m e a 2,5 m" />
+  <img src="docs/exemplo_escala_50000.png" width="100%" alt="Escala 1:50.000: imagens de 10 m e de 2,5 m de 2025 e 2026" />
 </p>
 
-Tile 018023, mosaicos de 28/07/2025 e 28/07/2026. Um fragmento de floresta (verde escuro) presente em 2025 aparece desmatado em 2026 (rosa), fora da máscara Prodes. A 2,5 m, os limites do corte, as faixas de preparo do solo e a borda remanescente ao norte ficam mais nítidos.
+Na escala 1:50.000, as imagens de 10 m e de 2,5 m são praticamente iguais. Os talhões, os remanescentes de vegetação e o desmatamento entre 2025 e 2026 são identificados da mesma forma nas duas resoluções.
 
 <p align="center">
-  <img src="docs/exemplo_mascara_prodes.png" width="75%" alt="Desmatamento novo junto à máscara Prodes 2025, a 10 m e a 2,5 m" />
+  <img src="docs/exemplo_escala_10000.png" width="100%" alt="Escala 1:10.000: remoção das copas e passagem de máquina vistas a 10 m e a 2,5 m" />
 </p>
 
-Tile 018026, mosaico de 28/07/2026, com a máscara Prodes 2025 (desmatamento acumulado) em amarelo. A área aberta ao sul da máscara é desmatamento posterior a ela, o tipo de polígono que o intérprete delimita.
-
-<p align="center">
-  <img src="docs/exemplo_detalhe.png" width="75%" alt="Detalhe de 700 m: pixels de 10 m e resultado de 2,5 m" />
-</p>
-
-Detalhe de 700 m na borda do mesmo corte do tile 018023. A 10 m, árvores isoladas, a estrada e o limite entre talhões aparecem como blocos de pixels; a 2,5 m, essas feições ganham forma.
+Na escala 1:10.000, centrada no fragmento de vegetação desmatado entre os dois anos, a imagem de 2,5 m mostra detalhes que a de 10 m não resolve: os sulcos paralelos deixados pela passagem de trator na área aberta, a remoção das copas no interior do fragmento e as árvores isoladas que permaneceram. No Prodes Pantanal, que tem classes de manejo, esse nível de detalhe ajuda a identificar se houve remoção de copas ou passagem de máquinas.
 
 ## Uso no Prodes
 
@@ -36,13 +30,16 @@ No Prodes, o desmatamento é mapeado por interpretação visual: o intérprete c
 
 - conferir limites de polígonos em bordas irregulares ou pouco contrastadas;
 - confirmar cortes pequenos, estradas e árvores remanescentes que, a 10 m, ficam no limite do que se distingue;
+- verificar sinais de manejo, como remoção de copas e passagem de trator, em escalas próximas de 1:10.000;
 - ajudar a separar corte raso de degradação quando a imagem original deixa dúvida.
+
+Em escalas de mapeamento como 1:50.000, o ganho é pequeno, e as imagens atuais seguem suficientes.
 
 Ele não deve ser usado como fonte única do mapeamento, pelos motivos abaixo:
 
 - A super-resolução não acrescenta informação ao dado de 10 m. O modelo reconstrói o detalhe mais provável para cada textura, e esse detalhe pode não corresponder ao terreno. Em caso de divergência, vale a imagem original.
 - A B11 (canal vermelho da composição) é uma banda de 20 m, e o detalhe dela a 2,5 m vem das bandas de 10 m (ver 3.4). A cor representa a resposta do SWIR, mas o contorno vem do visível e do infravermelho próximo.
-- Nuvens e sombras residuais dos mosaicos de 16 dias, como as do mosaico de 2025 do tile 018026, passam para o produto de 2,5 m sem correção.
+- Nuvens e sombras residuais dos mosaicos de 16 dias passam para o produto de 2,5 m sem correção.
 
 ## 1. Instalação
 
@@ -82,11 +79,11 @@ O tile (10.560 × 10.560 pixels de 10 m) é processado em janelas de 128 × 128 
 
 ### 3.3 LDSR-S2
 
-O LDSR-S2 é um modelo de difusão latente para super-resolução de Sentinel-2 com fator 4, aplicado às bandas B04, B03, B02 e B08 (DONIKE et al., 2025). A difusão roda com 25 passos DDIM e semente fixa (42), de modo que a mesma configuração, na mesma máquina, gera o mesmo resultado.
+O LDSR-S2 é um modelo de difusão latente para super-resolução de Sentinel-2 com fator 4, aplicado às bandas B04, B03, B02 e B08 (DONIKE et al., 2025a). O script usa o modelo e os pesos distribuídos no pacote opensr-model, versão 1.0.8 (DONIKE et al., 2025b). A difusão roda com 25 passos DDIM e semente fixa (42), de modo que a mesma configuração, na mesma máquina, gera o mesmo resultado.
 
 Depois da difusão, o histograma de cada banda de cada janela é ajustado ao histograma da mesma banda a 10 m. Assim, o produto de 2,5 m mantém a radiometria do mosaico original e não há diferença de cor entre janelas. Dentro da área válida, a reflectância mínima é limitada a 0,0001, para que nenhum pixel válido se confunda com nodata.
 
-### 3.4 B11 guiada (modo `fast`)
+### 3.4 Sharpening da B11 (modo `fast`)
 
 A B11 do BDC é uma banda de 20 m reamostrada para 10 m e não tem detalhe abaixo de cerca de 20 m. No modo `fast`, ela é levada a 2,5 m por injeção de detalhe com regressão, técnica de pansharpening:
 
@@ -100,7 +97,7 @@ Num teste pelo protocolo de Wald (WALD; RANCHIN; MANGOLINI, 1997), com degradaç
 
 | Modo | Bandas de 10 m | B11 | Tempo por janela |
 | --- | --- | --- | --- |
-| `fast` | LDSR-S2 | guiada pelas bandas do LDSR-S2 (3.4) | ~1 s |
+| `fast` | LDSR-S2 | sharpening com as bandas do LDSR-S2 (3.4) | ~1 s |
 | `combined` | LDSR-S2 (modelo LDSRS2-SEN2SR, 10 bandas) | SEN2SR | ~3 s |
 | `separate` | LDSR-S2 | SEN2SR em separado | |
 
@@ -137,9 +134,11 @@ gdaladdo -ro -r average --config COMPRESS_OVERVIEW ZSTD --config PREDICTOR_OVERV
 
 ## Referências
 
-ALMEIDA, C. A. et al. **Metodologia utilizada nos sistemas PRODES e DETER**. 2. ed. São José dos Campos: INPE, 2022. Disponível em: http://urlib.net/ibi/8JMKD3MGP3W34T/47GAF6S.
+ALMEIDA, C. A.; MAURANO, L. E. P.; VALERIANO, D. M.; CÂMARA, G.; VINHAS, L.; MOTTA, M.; GOMES, A. R.; MONTEIRO, A. M. V.; SOUZA, A. A. A.; MESSIAS, C. G.; RENNÓ, C. D.; ADAMI, M.; ESCADA, M. I. S.; SOLER, L. S.; AMARAL, S. **Metodologia utilizada nos sistemas PRODES e DETER – 2ª edição (atualizada)**. 2. ed. São José dos Campos: INPE, 2022. 47 p. Disponível em: http://urlib.net/ibi/8JMKD3MGP3W34T/47GAF6S.
 
-DONIKE, S.; AYBAR, C.; GÓMEZ-CHOVA, L.; KALAITZIS, F. Trustworthy super-resolution of multispectral Sentinel-2 imagery with latent diffusion. **IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing**, v. 18, p. 6940-6952, 2025. DOI: 10.1109/JSTARS.2025.3542220.
+DONIKE, S.; AYBAR, C.; GÓMEZ-CHOVA, L.; KALAITZIS, F. Trustworthy super-resolution of multispectral Sentinel-2 imagery with latent diffusion. **IEEE Journal of Selected Topics in Applied Earth Observations and Remote Sensing**, v. 18, p. 6940-6952, 2025a. DOI: 10.1109/JSTARS.2025.3542220.
+
+DONIKE, S.; AYBAR, C.; GÓMEZ-CHOVA, L.; KALAITZIS, F. **opensr-model**: ESA OpenSR diffusion model package for super-resolution of Sentinel-2 imagery. Versão 1.0.8. 2025b. Disponível em: https://github.com/ESAOpenSR/opensr-model.
 
 ESA OPENSR. **SEN2SR**: super-resolution of Sentinel-2 imagery to 2.5 m. 2025. Disponível em: https://github.com/ESAOpenSR/sen2sr.
 
