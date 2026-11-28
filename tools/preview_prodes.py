@@ -34,14 +34,25 @@ def _stretch(x, lo, hi):
     return np.clip((x.astype("float32") - lo) / max(hi - lo, 1e-6), 0, 1)
 
 
-if "prodes" in outs and os.path.exists(outs["prodes"]):
+_bi = None
+if "sr" in outs and os.path.exists(outs["sr"]):
+    with rasterio.open(outs["sr"]) as d:
+        _desc = list(d.descriptions)
+    if all(b in _desc for b in ("B11", "B08", "B04")):
+        _bi = [_desc.index(b) + 1 for b in ("B11", "B08", "B04")]
+if _bi:
+    # PRODES R=B11 G=B08 B=B04 read straight from the SR file; 2-98 % stretch of the original 10 m bands
     _bar.set_description("Preview: PRODES overview")
-    with rasterio.open(outs["prodes"]) as d:
+    lo, hi = [], []
+    for b in ("B11", "B08", "B04"):
+        with rasterio.open(inp[b]) as o:
+            v = o.read(1, out_shape=(max(1, o.height // 8), max(1, o.width // 8)), resampling=Resampling.nearest)
+        v = v[v > 0]
+        lo.append(float(np.percentile(v, 2)) if v.size else 0.0)
+        hi.append(float(np.percentile(v, 98)) if v.size else 10000.0)
+    with rasterio.open(outs["sr"]) as d:
         k = max(1, max(d.height, d.width) // 1500)
-        over = d.read([1, 2, 3], out_shape=(3, d.height // k, d.width // k), resampling=Resampling.average)
-        t = d.tags()
-        lo = [float(v) for v in t.get("STRETCH_LO", "0,0,0").split(",")]
-        hi = [float(v) for v in t.get("STRETCH_HI", "10000,10000,10000").split(",")]
+        over = d.read(_bi, out_shape=(3, d.height // k, d.width // k), resampling=Resampling.average)
         S = 4
         Wlr, Hlr = d.width // S, d.height // S
         ZOOM_LR_PX = int(min(ZOOM_LR_PX, Wlr, Hlr))
@@ -49,7 +60,7 @@ if "prodes" in outs and os.path.exists(outs["prodes"]):
         cx, cy = ZOOM_CENTER if ZOOM_CENTER else (Wlr // 2, Hlr // 2)
         cx, cy = min(max(cx, half), Wlr - half), min(max(cy, half), Hlr - half)
         win_sr = Window((cx - half) * S, (cy - half) * S, ZOOM_LR_PX * S, ZOOM_LR_PX * S)
-        sr_zoom = d.read([1, 2, 3], window=win_sr)
+        sr_zoom = d.read(_bi, window=win_sr)
         bounds = rasterio.windows.bounds(win_sr, d.transform)
     _bar.update(1)
     _bar.set_description("Preview: original 10 m crop")

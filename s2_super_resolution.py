@@ -3,11 +3,15 @@
 # =====================================================================
 
 # %% BLOCK 1 — PARAMETERS
-TILE = "012014"
-DATE = "2026-07-12"
+# Block 2 runs every TILE x DATE pair in sequence. Pairs whose output already exists are skipped
+# (their log and report are left untouched), so re-running block 2 continues where it stopped.
+TILES = ["020025"]                             # BDC_SM_V2 tiles "hhhvvv"
+# DATE = start day of the BDC S2-16D-2 mosaic (they start every 16 days from 1 January).
+# "2026-07-28" = mosaic 28/07 to 12/08/2026. Runs go date by date: every tile of the first date, then the next date.
+DATES = ["2026-07-28", "2025-07-28"]
 
 # Working directory for downloaded cubes, models and results (relative to the notebook location)
-ROOT    = "rascunho/biomasbr-amazonia/super_resolution"
+ROOT    = "work"
 OUT_DIR = ROOT + "/cube_resolution"            # per-run logs are written to OUT_DIR/logs
 
 # Input source:
@@ -33,11 +37,11 @@ PRECISION   = "auto"                           # "auto" | "fp32" | "bf16"
 BATCH_SIZE  = 0                                # 0 = auto
 OVERLAP     = 16                               # window overlap, 10 m pixels
 
-# Super-resolution mode (all modes write the PRODES composite R=B11 G=B08 B=B04 at 2.5 m):
+# Super-resolution mode (output: one multiband GeoTIFF at 2.5 m; compose RGB or PRODES 11/8/4 in the GIS):
 #   "fast"      LDSR-S2 on B04,B03,B02,B08; B11 sharpened with the LDSR-S2 output   (~1 s/window)
 #   "combined"  OpenSR LDSRS2-SEN2SR, 10 bands, B11 from SEN2SR                    (~3 s/window, MIG 2g.24gb)
 #   "separate"  LDSR-S2 plus SEN2SR (SEN2SR_DIR) for B11
-# B04/B08 (G and B of the PRODES composite) come from the same LDSR-S2 diffusion in "fast" and "combined",
+# B04/B08 come from the same LDSR-S2 diffusion in "fast" and "combined",
 # so the two modes differ only in B11. B11 is a 20 m band: its 2.5 m detail is always borrowed from B04/B03/B02/B08.
 MODE         = "fast"
 COMBINED_DIR = ROOT + "/model/LDSRS2-SEN2SR"   # downloaded on first use (~1.5 GB)
@@ -146,7 +150,7 @@ import json
 import hashlib
 import logging
 import argparse
-from contextlib import nullcontext, ExitStack
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta
@@ -332,6 +336,14 @@ def attach_log_file(path: Path):
     log.addHandler(fh)
 
 
+def discard_unattached_log():
+    """Run skipped before its log file was opened: drop the buffered lines (they were already shown on screen)."""
+    global _LOGBUF
+    if _LOGBUF is not None:
+        log.removeHandler(_LOGBUF)
+        _LOGBUF = None
+
+
 def dump_unattached_log(path: Path):
     """Run failed before the output name was known: keep what was logged anyway."""
     global _LOGBUF
@@ -466,13 +478,16 @@ def log_hardware(hw: Hardware):
 
 # ---------------------------------------------------------------- engines
 def gpu_hist_match(sr: torch.Tensor, lr: torch.Tensor) -> torch.Tensor:
-    """Per-channel histogram matching SR -> LR on the GPU, ignoring nodata (0)."""
+    """Per-channel histogram matching SR -> LR on the GPU, ignoring nodata (0).
+    The SR pixels to match are chosen from the LR validity mask (not from SR > 0): SR pixels that the network
+    output as 0 inside valid data are matched too, instead of staying 0 and turning into nodata specks."""
     out = sr.clone()
     B, C = sr.shape[:2]
+    lr_valid = F.interpolate((lr > 0).float(), size=sr.shape[-2:], mode="nearest") > 0
     for b in range(B):
         for c in range(C):
             s, r = sr[b, c].reshape(-1), lr[b, c].reshape(-1)
-            sm, rm = s > 0, r > 0
+            sm, rm = lr_valid[b, c].reshape(-1), r > 0
             ns, nr = int(sm.sum()), int(rm.sum())
             if ns == 0 or nr < 16:
                 continue
@@ -1125,7 +1140,12 @@ class BatchRunner:
     def __call__(self, arr: np.ndarray):
         try:
             X = torch.from_numpy(arr).to(self.engine.device, non_blocking=True)
-            return {k: v.float().cpu().numpy() for k, v in self.engine.predict(X).items()}
+            out = self.engine.predict(X)
+            # 0 is reserved for nodata: inside valid input, keep SR reflectance >= 1e-4 (1 after x10000)
+            valid = F.interpolate((X > 0).all(1, keepdim=True).float(), scale_factor=self.engine.scale,
+                                  mode="nearest") > 0
+            out["sr"] = torch.where(valid, out["sr"].float().clamp_min(1e-4), torch.zeros((), device=X.device))
+            return {k: v.float().cpu().numpy() for k, v in out.items()}
         except Exception as e:
             if not _is_oom(e):
                 raise
@@ -1514,7 +1534,7 @@ def run_pipeline(stack: BandStack, runner: BatchRunner, args, out_paths: dict, b
 
     key = json.dumps(dict(tag=tag, hrefs=stack.hrefs, roi=[stack.x0, stack.y0, stack.W, stack.H], ov=args.overlap,
                           trim=args.trim, steps=args.steps, nvar=args.uncertainty, S=S, hist=args.hist_match,
-                          db=args.deblock_20m, scale=stack.scales, offset=stack.offsets, b11="mtf-v2"), sort_keys=True)
+                          db=args.deblock_20m, scale=stack.scales, offset=stack.offsets, b11="mtf-v2", nodata="v2"), sort_keys=True)
     phash = hashlib.sha1(key.encode()).hexdigest()[:16]
 
     prog_path = out_paths["sr"].with_suffix(".progress.json")
@@ -1606,59 +1626,6 @@ def run_pipeline(stack: BandStack, runner: BatchRunner, args, out_paths: dict, b
                 final_batch=runner.bs)
 
 
-# ---------------------------------------------------------------- PRODES composite (R=B11, G=B08, B=B04, Int16)
-def build_prodes(chans, out_tif: Path, compress="deflate", lo_pct=2, hi_pct=98, stretch_ref=None):
-    """chans = [(file, band_index_1based, label)] in R, G, B order. Output grid = channel G.
-    Bands keep their reflectance values (Int16, x10000); the 2-98 % stretch is only stored as tags for display.
-    stretch_ref = original 10 m files (B11, B08, B04): the stretch is taken from them over the same area,
-    so every mode is displayed with the same contrast."""
-    with ExitStack() as es:
-        ds = [es.enter_context(rasterio.open(p)) for p, _, _ in chans]
-        ref = ds[1]
-        H, W = ref.height, ref.width
-        f = max(1, max(H, W) // 3000)
-        small = (H // f, W // f)
-        lo, hi = [], []
-        for k, (d, (_, bi, _)) in enumerate(zip(ds, chans)):
-            if stretch_ref and stretch_ref[k]:
-                with rasterio.open(stretch_ref[k]) as o:
-                    win = rasterio.windows.from_bounds(*ref.bounds, transform=o.transform)
-                    v = o.read(1, window=win, out_shape=(max(1, H // 4 // f), max(1, W // 4 // f)),
-                               resampling=Resampling.nearest)
-                    sc = o.scales[0] if o.scales and o.scales[0] not in (None, 1.0) else 1e-4
-                    v = v[v > 0].astype(np.float32) * sc * 1e4
-            else:
-                v = d.read(bi, out_shape=small, resampling=Resampling.nearest)
-                v = v[v > 0]
-            lo.append(np.percentile(v, lo_pct) if v.size else 0)
-            hi.append(np.percentile(v, hi_pct) if v.size else 1)
-        prof = dict(driver="GTiff", height=H, width=W, count=3, dtype="int16", crs=ref.crs, transform=ref.transform,
-                    nodata=0, tiled=True, blockxsize=512, blockysize=512, BIGTIFF="YES",
-                    compress=compress.upper(), predictor=2, NUM_THREADS="ALL_CPUS")
-        tmp = out_tif.with_name(out_tif.stem + ".partial.tif")
-        with rasterio.open(tmp, "w", **prof) as dst:
-            for i, (_, _, lab) in enumerate(chans, 1):
-                dst.set_band_description(i, lab)
-            dst.update_tags(COMPOSITION="R=B11 G=B08 B=B04 (PRODES)",
-                            STRETCH_LO=",".join(f"{v:.1f}" for v in lo), STRETCH_HI=",".join(f"{v:.1f}" for v in hi))
-            for r0 in tqdm(range(0, H, 1024), desc="PRODES composite", unit="block", leave=True):
-                h = min(1024, H - r0)
-                win = Window(0, r0, W, h)
-                arrs = []
-                for d, (_, bi, _) in zip(ds, chans):
-                    rr = d.height / H
-                    arrs.append(d.read(bi, window=win) if rr == 1.0 else
-                                d.read(bi, window=Window(0, r0 * rr, W * rr, h * rr), out_shape=(h, W),
-                                       resampling=Resampling.bilinear))
-                valid = (arrs[1] > 0) & (arrs[2] > 0)
-                out = np.zeros((3, h, W), np.int16)
-                for k, ch in enumerate(arrs):
-                    out[k] = np.where(valid, np.clip(np.rint(ch), 1, 32767), 0).astype(np.int16)
-                dst.write(out, window=win)
-        os.replace(tmp, out_tif)
-
-
-# ---------------------------------------------------------------- main
 def parse_args(argv):
     p = argparse.ArgumentParser()
     g = p.add_argument_group("input")
@@ -1666,9 +1633,9 @@ def parse_args(argv):
     g.add_argument("--date", required=True)
     g.add_argument("--source", choices=["auto", "local", "16d", "l2a", "bdc16d"], default="auto")
     g.add_argument("--local-pattern",
-                   default="rascunho/biomasbr-amazonia/super_resolution/cube/SENTINEL-2_MSI_{tile}_{band}_{date}.tif")
+                   default="work/cube/SENTINEL-2_MSI_{tile}_{band}_{date}.tif")
     g.add_argument("--local-kind", choices=["16d", "l2a"], default="16d")
-    g.add_argument("--download-dir", default="rascunho/biomasbr-amazonia/super_resolution/cube_bdc_16d")
+    g.add_argument("--download-dir", default="work/cube_bdc_16d")
     g.add_argument("--stac-url", default="https://data.inpe.br/bdc/stac/v1")
     g.add_argument("--collection-16d", default="S2-16D-2")
     g.add_argument("--collection-l2a", default="S2_L2A-1")
@@ -1683,9 +1650,9 @@ def parse_args(argv):
     g.add_argument("--box-km", type=float, default=10.0)
     g = p.add_argument_group("model")
     g.add_argument("--mode", choices=["fast", "combined", "separate"], default="fast")
-    g.add_argument("--combined-dir", default="rascunho/biomasbr-amazonia/super_resolution/model/LDSRS2-SEN2SR")
+    g.add_argument("--combined-dir", default="work/model/LDSRS2-SEN2SR")
     g.add_argument("--engine", choices=["ldsr", "bicubic"], default="ldsr")
-    g.add_argument("--model-dir", default="rascunho/biomasbr-amazonia/super_resolution/model/LDSR_S2")
+    g.add_argument("--model-dir", default="work/model/LDSR_S2")
     g.add_argument("--config", default=None)
     g.add_argument("--steps", type=int, default=100)
     g.add_argument("--hist-match", choices=["gpu", "cpu", "off"], default="gpu")
@@ -1701,13 +1668,12 @@ def parse_args(argv):
     g.add_argument("--trim", type=int, default=2)
     g.add_argument("--min-valid", type=float, default=0.02)
     g = p.add_argument_group("output")
-    g.add_argument("--out-dir", default="rascunho/biomasbr-amazonia/super_resolution/cube_resolution")
+    g.add_argument("--out-dir", default="work/cube_resolution")
     g.add_argument("--compress", choices=["zstd", "deflate", "lzw", "none"], default="zstd")
     g.add_argument("--zstd-level", type=int, default=9)
     g.add_argument("--overwrite", action="store_true")
     g.add_argument("--with-b11", action="store_true")
-    g.add_argument("--sen2sr-dir", default="rascunho/biomasbr-amazonia/super_resolution/model/SEN2SR_main")
-    g.add_argument("--prodes-composite", action="store_true")
+    g.add_argument("--sen2sr-dir", default="work/model/SEN2SR_main")
     g.add_argument("--probe-only", action="store_true")
     return p.parse_args(argv)
 
@@ -1771,8 +1737,6 @@ def main(argv=None, t_start=None):
     fast = args.mode == "fast"
     if fast or combined:
         args.with_b11 = False
-    elif args.prodes_composite:
-        args.with_b11 = True
     if combined:
         args.uncertainty = 0
     if args.uncertainty and args.uncertainty <= 3:
@@ -1793,12 +1757,11 @@ def main(argv=None, t_start=None):
         plan.append(sr_stage)
         if args.with_b11:
             plan += ["Preparing B11 (SEN2SR)", "Super-resolution B11 (SEN2SR)"]
-        if args.prodes_composite:
-            plan.append("PRODES composite")
         plan.append("Final report")
-    init = (_T_MODULE_LOADED - t_start) if t_start is not None else None
+    # import time only counts for the first run (later runs of the loop start after the imports)
+    init = (_T_MODULE_LOADED - t_start) if t_start is not None and t_start < _T_MODULE_LOADED else None
     st = Stages(plan, init_seconds=init, t0=t_start)
-    ok, report, outputs = False, {}, []
+    ok, report, outputs, skipped = False, {}, [], False
     try:
         st.start("Detecting GPU/CUDA")
         hw = detect_hardware()
@@ -1830,6 +1793,11 @@ def main(argv=None, t_start=None):
         uses_b20 = combined or fast or args.with_b11
         base = run_stem(args, src.kind, combined, fast, uses_b20)
         run_desc = run_description(args, src.kind, combined, fast, uses_b20)
+        if (out_dir / f"{base}.tif").exists() and not args.overwrite and not args.probe_only:
+            # already done: leave its .log and .report.json untouched (set OVERWRITE = True to redo it)
+            log.info("Already done, skipped: %s", out_dir / f"{base}.tif")
+            skipped = True
+            return 0
         attach_log_file(logs_dir / f"{base}.log")
         log.info("Output name: %s", base)
         log.info("Run: %s", run_desc)
@@ -1925,9 +1893,6 @@ def main(argv=None, t_start=None):
             if hw.cuda:
                 torch.cuda.empty_cache()
 
-        comp = out_dir / f"{base}_PRODES.tif"
-        p = out_paths["sr"]
-        prodes_chans = None
         if args.with_b11:
             b11_path = out_dir / f"{base}_B11.tif"
             st.start("Preparing B11 (SEN2SR)")
@@ -1950,43 +1915,34 @@ def main(argv=None, t_start=None):
                     torch.cuda.empty_cache()
             outputs.append(b11_path)
             report["outputs"]["b11"] = str(b11_path)
-            prodes_chans = [(b11_path, 1, "B11 (SEN2SR)"), (p, 4, "B08 (LDSR-S2)"), (p, 1, "B04 (LDSR-S2)")]
-        elif fast:
-            prodes_chans = [(p, 5, "B11 (guided by LDSR-S2)"), (p, 4, "B08 (LDSR-S2)"), (p, 1, "B04 (LDSR-S2)")]
-        elif combined:
-            prodes_chans = [(p, 9, "B11 (LDSRS2-SEN2SR)"), (p, 7, "B08 (LDSRS2-SEN2SR)"), (p, 3, "B04 (LDSRS2-SEN2SR)")]
-
-        if args.prodes_composite and prodes_chans and not args.probe_only:
-            st.start("PRODES composite")
-            if not comp.exists() or args.overwrite:
-                build_prodes(prodes_chans, comp, stretch_ref=[src.hrefs.get(b) for b in ("B11", "B08", "B04")])
-            outputs.append(comp)
-            report["outputs"]["prodes"] = str(comp)
-
         st.start("Final report")
         ok = True
     finally:
-        if ok and not args.probe_only:
-            cleanup_partials(out_dir, args.download_dir, args.model_dir, args.combined_dir, args.sen2sr_dir)
-        total = st.finish(ok)
-        if ok and not args.probe_only and report:
-            report["times_s"] = {k: round(v, 1) for k, v in st.times.items()}
-            report["total_time"] = fmt_t(total)
-            report["outputs"].update({k: str(v) for k, v in out_paths.items()})
-            rp = logs_dir / f"{base}.report.json"
-            rp.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-            log.info("Files written to %s:", out_dir.resolve())
-            for f in outputs:
-                log.info("  %s  (%s)", f.name, _size(f))
-            log.info("Logs: %s", logs_dir.resolve() / f"{base}.log (+ .report.json)")
-        dump_unattached_log(logs_dir / f"{args.tile}_{args.date}_aborted-before-start.log")
+        if skipped:
+            st.bar.close()
+            discard_unattached_log()
+        else:
+            if ok and not args.probe_only:
+                cleanup_partials(out_dir, args.download_dir, args.model_dir, args.combined_dir, args.sen2sr_dir)
+            total = st.finish(ok)
+            if ok and not args.probe_only and report:
+                report["times_s"] = {k: round(v, 1) for k, v in st.times.items()}
+                report["total_time"] = fmt_t(total)
+                report["outputs"].update({k: str(v) for k, v in out_paths.items()})
+                rp = logs_dir / f"{base}.report.json"
+                rp.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+                log.info("Files written to %s:", out_dir.resolve())
+                for f in outputs:
+                    log.info("  %s  (%s)", f.name, _size(f))
+                log.info("Logs: %s", logs_dir.resolve() / f"{base}.log (+ .report.json)")
+            dump_unattached_log(logs_dir / f"{args.tile}_{args.date}_aborted-before-start.log")
     return 0
 
 
 def _argv_from_params():
     g = globals().get
     mode = g("MODE", "fast")
-    R = g("ROOT", "rascunho/biomasbr-amazonia/super_resolution")
+    R = g("ROOT", "work")
     a = ["--tile", g("TILE"), "--date", g("DATE"), "--out-dir", g("OUT_DIR", R + "/cube_resolution"),
          "--source", g("SOURCE", "auto"), "--local-pattern", g("LOCAL_PATTERN", R + "/cube/SENTINEL-2_MSI_{tile}_{band}_{date}.tif"),
          "--local-kind", g("LOCAL_KIND", "16d"), "--download-dir", g("DOWNLOAD_DIR", R + "/cube_bdc_16d"),
@@ -2004,8 +1960,6 @@ def _argv_from_params():
         a += ["--uncertainty", str(g("UNCERTAINTY"))]
     if g("CONFIG"):
         a += ["--config", g("CONFIG")]
-    if mode in ("fast", "combined") or g("WITH_B11"):
-        a += ["--prodes-composite"]
     if mode == "separate" and g("WITH_B11"):
         a += ["--with-b11"]
     if g("OVERWRITE"):
@@ -2015,13 +1969,33 @@ def _argv_from_params():
     return a
 
 
-try:
-    main(_argv_from_params(), t_start=_T_CELL0)
-except SystemExit as _e:
-    if _e.code not in (0, None):
-        print("ERROR:", _e.code)
-except KeyboardInterrupt:
-    print("Interrupted. Run block 2 again to resume where it stopped.")
+_RUNS = [(t, d) for d in (globals().get("DATES") or [globals().get("DATE")])
+         for t in (globals().get("TILES") or [globals().get("TILE")])]
+_DONE, _FAILED = [], []
+for _k, (TILE, DATE) in enumerate(_RUNS, 1):
+    print(f"\n{'#' * 70}\n# Run {_k}/{len(_RUNS)}: tile {TILE}, date {DATE}\n{'#' * 70}")
+    try:
+        main(_argv_from_params(), t_start=_T_CELL0 if _k == 1 else time.perf_counter())
+        _DONE.append((TILE, DATE))
+    except SystemExit as _e:
+        if _e.code not in (0, None):
+            print("ERROR:", _e.code)
+            _FAILED.append((TILE, DATE, str(_e.code)[:200]))
+        else:
+            _DONE.append((TILE, DATE))
+    except KeyboardInterrupt:
+        print("Interrupted. Run block 2 again to resume where it stopped.")
+        break
+    except Exception as _e:                      # one bad tile/date must not stop the others
+        import traceback
+        traceback.print_exc()
+        _FAILED.append((TILE, DATE, f"{type(_e).__name__}: {str(_e)[:200]}"))
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+print(f"\nFinished {len(_DONE)}/{len(_RUNS)} runs.")
+for _f in _FAILED:
+    print("  FAILED:", *_f)
 
 
 # %% BLOCK 3 (optional) — PRODES PREVIEW (R=B11, G=B08, B=B04)
@@ -2047,14 +2021,25 @@ def _stretch(x, lo, hi):
     return np.clip((x.astype("float32") - lo) / max(hi - lo, 1e-6), 0, 1)
 
 
-if "prodes" in outs and os.path.exists(outs["prodes"]):
+_bi = None
+if "sr" in outs and os.path.exists(outs["sr"]):
+    with rasterio.open(outs["sr"]) as d:
+        _desc = list(d.descriptions)
+    if all(b in _desc for b in ("B11", "B08", "B04")):
+        _bi = [_desc.index(b) + 1 for b in ("B11", "B08", "B04")]
+if _bi:
+    # PRODES R=B11 G=B08 B=B04 read straight from the SR file; 2-98 % stretch of the original 10 m bands
     _bar.set_description("Preview: PRODES overview")
-    with rasterio.open(outs["prodes"]) as d:
+    lo, hi = [], []
+    for b in ("B11", "B08", "B04"):
+        with rasterio.open(inp[b]) as o:
+            v = o.read(1, out_shape=(max(1, o.height // 8), max(1, o.width // 8)), resampling=Resampling.nearest)
+        v = v[v > 0]
+        lo.append(float(np.percentile(v, 2)) if v.size else 0.0)
+        hi.append(float(np.percentile(v, 98)) if v.size else 10000.0)
+    with rasterio.open(outs["sr"]) as d:
         k = max(1, max(d.height, d.width) // 1500)
-        over = d.read([1, 2, 3], out_shape=(3, d.height // k, d.width // k), resampling=Resampling.average)
-        t = d.tags()
-        lo = [float(v) for v in t.get("STRETCH_LO", "0,0,0").split(",")]
-        hi = [float(v) for v in t.get("STRETCH_HI", "10000,10000,10000").split(",")]
+        over = d.read(_bi, out_shape=(3, d.height // k, d.width // k), resampling=Resampling.average)
         S = 4
         Wlr, Hlr = d.width // S, d.height // S
         ZOOM_LR_PX = int(min(ZOOM_LR_PX, Wlr, Hlr))
@@ -2062,7 +2047,7 @@ if "prodes" in outs and os.path.exists(outs["prodes"]):
         cx, cy = ZOOM_CENTER if ZOOM_CENTER else (Wlr // 2, Hlr // 2)
         cx, cy = min(max(cx, half), Wlr - half), min(max(cy, half), Hlr - half)
         win_sr = Window((cx - half) * S, (cy - half) * S, ZOOM_LR_PX * S, ZOOM_LR_PX * S)
-        sr_zoom = d.read([1, 2, 3], window=win_sr)
+        sr_zoom = d.read(_bi, window=win_sr)
         bounds = rasterio.windows.bounds(win_sr, d.transform)
     _bar.update(1)
     _bar.set_description("Preview: original 10 m crop")

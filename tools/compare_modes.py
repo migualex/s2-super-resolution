@@ -25,7 +25,7 @@ OUT_DIR = globals().get("OUT_DIR", "work/cube_resolution")
 CMP_ZOOM_PX = 160                # displayed crop, in 10 m pixels
 CMP_METRIC_PX = 512              # area used for the numbers, in 10 m pixels
 CMP_CENTER = None                # (x, y) in 10 m pixels inside the processed area; None = center
-CMP_KEEP = None                  # None = all products found | list of name fragments, e.g. ["combined", "_raw"]
+CMP_KEEP = None                  # None = all products found | list of name fragments, e.g. ["combined", "_db1"]
 
 _bar = tqdm(total=5, desc="Comparison: locating products", unit="step")
 _cand, TAGS = [], {}
@@ -220,5 +220,4 @@ plt.tight_layout()
 _bar.update(1)
 _bar.set_description("Comparison ready")
 _bar.close()
-plt.show()
 plt.show()
