@@ -1,9 +1,9 @@
 # =====================================================================
-# PRODES preview (R=B11, G=B08, B=B04) of the latest s2_super_resolution.py run
+# PRODES preview (R=B11, G=B08, B=B04) of the latest sen2sr-prodes.py run
 # Overview of the whole product plus original 10 m vs super-resolved 2.5 m on the same crop.
 #
 #   python tools/preview_prodes.py [OUT_DIR]
-# or run it as a cell in the same kernel as s2_super_resolution.py (OUT_DIR is reused).
+# or run it as a cell in the same kernel as sen2sr-prodes.py (OUT_DIR is reused).
 # =====================================================================
 
 # %% PRODES PREVIEW

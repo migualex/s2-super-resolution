@@ -1,9 +1,9 @@
 # =====================================================================
 # Comparison: original 10 m vs LDSR-S2 (fast) vs combined — visible, PRODES and B11 diagnostics
-# Requires s2_super_resolution.py runs with the same TILE, DATE and ROI (e.g. "fast" and "combined").
+# Requires sen2sr-prodes.py runs with the same TILE, DATE and ROI (e.g. "fast" and "combined").
 #
 #   python tools/compare_modes.py TILE DATE [OUT_DIR]      e.g. 034026 2026-07-12
-# or run it as a cell in the same kernel as s2_super_resolution.py (TILE, DATE, OUT_DIR are reused).
+# or run it as a cell in the same kernel as sen2sr-prodes.py (TILE, DATE, OUT_DIR are reused).
 # =====================================================================
 
 # %% COMPARISON
